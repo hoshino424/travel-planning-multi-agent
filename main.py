@@ -155,7 +155,7 @@ with st.sidebar:
     budget = st.select_slider("予算", options=["節約", "標準", "贅沢"])
     preferences = st.text_area("こだわり")
 
-destination = st.text_input("目的地と期間", placeholder="例：パリ 3泊5日")
+destination = st.text_input("目的地（外国は英語表記で入力）と期間", placeholder="例：京都　3泊5日※目的地と期間はスペース空けて入力")
 
 # --- 5. メイン実行ロジック ---
 if st.button("🚀 議論を開始する") and destination:
