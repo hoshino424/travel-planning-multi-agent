@@ -27,7 +27,6 @@ if "context_info" not in st.session_state:
 def get_weather_info(city_name):
     """世界中の都市に対応した天気情報を取得する"""
     api_key = os.getenv("OPENWEATHER_API_KEY")
-    # グローバル対応のため ",JP" を削除。都市名だけで世界中を検索します。
     url = f"https://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={api_key}&units=metric&lang=ja"
     try:
         response = requests.get(url, timeout=5)
@@ -135,31 +134,39 @@ with st.sidebar:
     st.header("旅行の条件")
     travel_date = st.date_input("📅 旅行開始日", datetime.date.today())
     weekday_ja = ["月", "火", "水", "木", "金", "土", "日"][travel_date.weekday()]
-    departure_loc = st.text_input("📍 出発地点", placeholder="例：西宮北口駅 14:00")
+    
+    # --- 修正点1: 出発地点と時刻を分離 ---
+    st.subheader("出発情報")
+    departure_loc = st.text_input("📍 出発地点", placeholder="例：西宮北口駅")
+    departure_time = st.time_input("🕒 出発時刻", value=datetime.time(14, 0))
     
     st.divider()
+    
+    # --- 修正点2: フライト情報のラベルを「到着」「出発」に最適化 ---
     st.subheader("✈️ フライト詳細（自由入力）")
     col1, col2 = st.columns(2)
     with col1:
         f_out_no = st.text_input("往路 便名 ", placeholder="NH1866")
     with col2:
-        f_out_time = st.text_input("往路 出発時刻 ", placeholder="14:15")
+        f_out_time = st.text_input("往路 到着時刻 ", placeholder="14:15")
+        st.caption("※現地到着時間")
     
     col3, col4 = st.columns(2)
     with col3:
         f_return_no = st.text_input("復路 便名", placeholder="ANA123")
     with col4:
         f_return_time = st.text_input("復路 出発時刻", placeholder="18:30")
+        st.caption("※現地出発時間")
         
     st.divider()
     budget = st.select_slider("予算", options=["節約", "標準", "贅沢"])
     preferences = st.text_area("こだわり")
 
-destination = st.text_input("目的地（英語表記で入力）と期間", placeholder="例：kyoto　2泊3日※目的地と期間はスペース空けて入力")
+# 目的地入力のガイダンスを強化
+destination = st.text_input("目的地（英語表記で入力）と期間", placeholder="例：kyoto　2泊3日 ※スペースを空けて入力してください")
 
 # --- 5. メイン実行ロジック ---
 if st.button("🚀 議論を開始する") and destination:
-    # 全角・半角スペース両方で分割できるよう処理
     dest_parts = destination.replace('　', ' ').split()
     city_name = dest_parts[0] if dest_parts else ""
 
@@ -180,12 +187,16 @@ if st.button("🚀 議論を開始する") and destination:
         
         st.write(f"✅ 調査完了。現地天候：{weather_text}")
 
+    # コンテキスト情報の構成を更新
     st.session_state.context_info = f"""
     - 旅行日: {travel_date} ({weekday_ja})
     - 目的地: {destination}
     - 出発地点: {departure_loc}
-    - 往路: {f_out_no} ({f_out_time}発)
-    - 復路: {f_return_no} ({f_return_time}発)
+    - 出発時刻: {departure_time.strftime('%H:%M')}
+    - 往路(行きの便): {f_out_no} (現地に {f_out_time} 到着予定)
+    - 復路(帰りの便): {f_return_no} (現地を {f_return_time} 出発予定)
+    - 予算感: {budget}
+    - ユーザーのこだわり: {preferences}
     - 現地コンディション: {weather_text}
     - 服装アドバイス: {clothing_tip}
     - 運行情報: {transit_link}
@@ -213,7 +224,7 @@ if st.session_state.final_plan:
     st.subheader("⚖️ 最終判断（プラン）")
     st.success(st.session_state.final_plan)
     
-    with st.expander("🔍 議論プロセスを確認"):
+    with st.expander("🔍 議論プロセス（旅行計画の詳細）を確認"):
         col_a, col_b = st.columns(2)
         with col_a:
             st.chat_message("assistant", avatar="🌸").markdown("**Agent A (ワクワク担当)**")
@@ -222,7 +233,6 @@ if st.session_state.final_plan:
             st.chat_message("assistant", avatar="⚡").markdown("**Agent B (現実担当)**")
             st.write(st.session_state.last_plan_b)
 
-    # フィードバック入力
     user_feedback = st.chat_input("修正案を入力してください（例：お昼はお寿司がいい、もっとゆったり等）")
     if user_feedback:
         with st.status("🔄 プランを再構築中...", expanded=True):
