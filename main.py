@@ -54,6 +54,32 @@ if "button_scale" not in st.session_state:
 if "outdoor_mode" not in st.session_state:
     st.session_state.outdoor_mode = False
 
+# --- 予算（総予算 + カテゴリ別） ---
+BUDGET_LEVELS = ["節約", "標準", "贅沢"]
+# 総予算スライダーは段階表示のため、1人あたり・旅行全体の目安額（円）に換算して扱う
+BUDGET_LEVEL_YEN = {"節約": 30000, "標準": 60000, "贅沢": 120000}
+BUDGET_CATEGORIES = [
+    ("food", "budget_food", "🍽️ 食費", 0.30),
+    ("transport", "budget_transport", "🚆 交通費", 0.20),
+    ("sightseeing", "budget_sightseeing", "🎫 観光・入場料", 0.15),
+    ("lodging", "budget_lodging", "🏨 宿泊", 0.25),
+    ("other", "budget_other", "🛍️ その他", 0.10),
+]
+if "budget_total" not in st.session_state:
+    st.session_state.budget_total = BUDGET_LEVELS[0]
+if "budget_breakdown_on" not in st.session_state:
+    st.session_state.budget_breakdown_on = False
+if "budget_breakdown_initialized" not in st.session_state:
+    st.session_state.budget_breakdown_initialized = False
+for _, state_key, _, _ in BUDGET_CATEGORIES:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0
+    else:
+        # トグルOFFで入力欄が非表示の間もウィジェットの値が消えないように保持する
+        st.session_state[state_key] = st.session_state[state_key]
+if "plan_budget" not in st.session_state:
+    st.session_state.plan_budget = None
+
 # --- 認証セッションの復元（Streamlitは再実行のたびにsupabaseクライアントを作り直すため） ---
 if st.session_state.sb_access_token and st.session_state.sb_refresh_token:
     try:
@@ -152,20 +178,21 @@ def search_web_assets(query, search_type="search"):
             return assets
     except: return ""
 
-def save_plan_and_get_url(plan_content, plan_a, plan_b):
+def save_plan_and_get_url(plan_content, plan_a, plan_b, budget=None):
     result = supabase.table("plans").insert({
         "plan_content": plan_content,
         "plan_a": plan_a,
-        "plan_b": plan_b
+        "plan_b": plan_b,
+        "budget": budget
     }).execute()
     plan_id = result.data[0]["id"]
     return f"https://jdgmmdxjnzzyxbpwnk3g7c.streamlit.app/?plan_id={plan_id}"
 
 def load_plan_by_id(plan_id):
-    result = supabase.table("plans").select("plan_content, plan_a, plan_b").eq("id", plan_id).single().execute()
+    result = supabase.table("plans").select("plan_content, plan_a, plan_b, budget").eq("id", plan_id).single().execute()
     return result.data if result.data else None
 
-def save_plan_record(destination, travel_date, plan_content, plan_a, plan_b, user_id, is_public):
+def save_plan_record(destination, travel_date, plan_content, plan_a, plan_b, user_id, is_public, budget=None):
     supabase.table("plans").insert({
         "destination": destination,
         "travel_date": travel_date.isoformat(),
@@ -173,12 +200,13 @@ def save_plan_record(destination, travel_date, plan_content, plan_a, plan_b, use
         "plan_a": plan_a,
         "plan_b": plan_b,
         "user_id": user_id,
-        "is_public": is_public
+        "is_public": is_public,
+        "budget": budget
     }).execute()
 
 def get_saved_plans_for_user(user_id):
     result = supabase.table("plans") \
-        .select("id, destination, travel_date, created_at, plan_content, plan_a, plan_b, is_public") \
+        .select("id, destination, travel_date, created_at, plan_content, plan_a, plan_b, is_public, budget") \
         .eq("user_id", user_id) \
         .order("created_at", desc=True) \
         .execute()
@@ -189,7 +217,7 @@ def delete_plan(plan_id):
 
 def get_public_plans():
     result = supabase.table("plans") \
-        .select("id, destination, travel_date, created_at, plan_content, plan_a, plan_b") \
+        .select("id, destination, travel_date, created_at, plan_content, plan_a, plan_b, budget") \
         .eq("is_public", True) \
         .order("created_at", desc=True) \
         .execute()
@@ -241,18 +269,26 @@ def get_place_details_text(place_name):
 # --- 3. エージェント設定 ---
 ROLES = {
     "A": "あなたは【旅の理想・ワクワク担当】です。日本語で、1〜3時間のゆとりあるブロック形式のプランを提案してください。画像やリンクも活用して。",
-    "B": "あなたは【現実の制約・ブレーキ担当】です。必ず日本語で回答してください。移動距離や天候リスク、営業時間を厳密にチェックし、無理がないか批判的に検討してください。",
+    "B": (
+        "あなたは【現実の制約・ブレーキ担当】です。必ず日本語で回答してください。移動距離や天候リスク、営業時間を厳密にチェックし、無理がないか批判的に検討してください。"
+        "前提条件に『カテゴリ別予算』がある場合は、食費・交通費・観光・入場料・宿泊・その他のカテゴリごとに概算費用を見積もって予算超過の可能性をチェックし、"
+        "超過しそうなカテゴリには、より安い移動手段・食事場所・施設などの具体的な代替案を出してください。"
+    ),
     "C": (
         "あなたは【まとめ担当】です。日本語で最終案を出してください。冒頭に『☀️当日のコンディション』、最後に提供されたリンクを全て含む『🔗旅の参考リンク集』を必ず掲載してください。"
         "プラン本文中の時刻（例：**14:30**）と金額（例：**1,500円**）は必ず **太字** にしてください。\n"
         "さらに、『🔗旅の参考リンク集』の後、回答の一番最後に、旅行中に急いで見ても分かる重要情報を次の形式で必ず出力してください。"
         "ブロックはコードブロックで囲まず、JSONは1行で出力し、ブロックの後には何も書かないでください。\n"
         "<<<KEY_INFO>>>\n"
-        '{"items":[{"level":"danger|warning|info","icon":"絵文字1つ","title":"20字以内","detail":"40字以内"}]}\n'
+        '{"items":[{"level":"danger|warning|info","icon":"絵文字1つ","title":"20字以内","detail":"40字以内"}],'
+        '"budget_estimate":{"food":12000,"transport":8000,"sightseeing":3000,"lodging":0,"other":2000}}\n'
         "<<<END_KEY_INFO>>>\n"
         "level の基準：danger＝時間の締切（フライト、終電、閉館・最終入場、予約時刻）、"
         "warning＝注意（雨、定休日、混雑、長距離移動）、info＝次の行動。"
         "items は重要度の高い順に最大5件としてください。"
+        "budget_estimate には、このプランにかかる1人あたりの概算費用を、食費(food)・交通費(transport)・観光・入場料(sightseeing)・宿泊(lodging)・その他(other)"
+        "の5カテゴリすべてについて、円の整数（カンマや単位なし）で必ず出力してください。海外旅行の場合も円に換算した概算にしてください。"
+        "カテゴリ別予算が指定されていない場合も budget_estimate は必ず出力してください。"
     )
 }
 
@@ -390,11 +426,44 @@ KEY_INFO_LEVELS = {
     "info": {"label": "➡️ 次の行動", "color": "#1565c0", "bg": "#e3f2fd"},
 }
 
+def _parse_yen(value):
+    """12000 / "12,000" / "¥12,000" / "12000円" を 0以上の整数に。解釈できなければ None"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(round(value)) if value >= 0 else None
+    if isinstance(value, str):
+        cleaned = re.sub(r"[,¥￥円\s]", "", value)
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None
+        return int(round(number)) if number >= 0 else None
+    return None
+
+def _parse_budget_estimate(raw_estimate):
+    """budget_estimate を {カテゴリ: 円} に正規化する。形が壊れていれば None"""
+    if not isinstance(raw_estimate, dict):
+        return None
+    estimate = {}
+    for category, _, _, _ in BUDGET_CATEGORIES:
+        if category not in raw_estimate:
+            estimate[category] = 0
+            continue
+        yen = _parse_yen(raw_estimate[category])
+        if yen is None:
+            return None
+        estimate[category] = yen
+    if not any(c in raw_estimate for c, _, _, _ in BUDGET_CATEGORIES):
+        return None
+    return estimate
+
 def parse_key_info(text):
-    """プラン全文から重要情報ブロックを取り出し、(ブロックを除いた本文, items) を返す"""
+    """プラン全文から重要情報ブロックを取り出し、(ブロックを除いた本文, items, budget_estimate) を返す"""
     if not text:
-        return text or "", []
+        return text or "", [], None
     items = []
+    budget_estimate = None
     match = KEY_INFO_PATTERN.search(text)
     if match:
         raw = match.group(1).strip()
@@ -418,11 +487,14 @@ def parse_key_info(text):
                 })
                 if len(items) >= 5:
                     break
+            if isinstance(data, dict):
+                budget_estimate = _parse_budget_estimate(data.get("budget_estimate"))
         except (ValueError, TypeError, AttributeError):
             items = []
+            budget_estimate = None
     body = KEY_INFO_PATTERN.sub("", text)
     body = KEY_INFO_UNCLOSED_PATTERN.sub("", body)
-    return body.rstrip(), items
+    return body.rstrip(), items, budget_estimate
 
 def render_key_info(items):
     """重要情報を danger→warning→info の順にカード表示する（itemsが空なら何も出さない）"""
@@ -454,11 +526,170 @@ def render_key_info(items):
         )
     st.markdown("".join(parts), unsafe_allow_html=True)
 
-def show_plan(plan_text):
-    """parse_key_info → render_key_info → 本文表示 の順でプランを表示する"""
-    body, items = parse_key_info(plan_text)
+# --- 予算チェック ---
+BUDGET_STATUS_STYLES = {
+    "over": {"color": "#c62828", "label": "オーバー"},
+    "near": {"color": "#f9a825", "label": "80%以上"},
+    "ok": {"color": "#2e7d32", "label": "予算内"},
+}
+
+def budget_status(estimate_yen, budget_yen):
+    """見積と予算から over(100%超) / near(80〜100%) / ok を返す"""
+    if budget_yen <= 0:
+        return "over" if estimate_yen > 0 else "ok"
+    ratio = estimate_yen / budget_yen
+    if ratio > 1:
+        return "over"
+    if ratio >= 0.8:
+        return "near"
+    return "ok"
+
+def build_budget_rows(estimate, budget):
+    """保存/生成時の予算設定と見積から予算チェックの行を作る。比較できなければ []"""
+    if not estimate or not isinstance(budget, dict):
+        return []
+    targets = []
+    categories = budget.get("categories")
+    if budget.get("breakdown_on") and isinstance(categories, dict):
+        for category, _, label, _ in BUDGET_CATEGORIES:
+            budget_yen = _parse_yen(categories.get(category, 0))
+            targets.append((label, estimate.get(category, 0), budget_yen or 0))
+    else:
+        total_yen = _parse_yen(budget.get("total"))
+        if total_yen is None:
+            return []
+        targets.append(("💴 合計", sum(estimate.values()), total_yen))
+    rows = []
+    for label, estimate_yen, budget_yen in targets:
+        rows.append({
+            "label": label,
+            "estimate": estimate_yen,
+            "budget": budget_yen,
+            "status": budget_status(estimate_yen, budget_yen),
+            "over": max(estimate_yen - budget_yen, 0),
+        })
+    return rows
+
+def budget_over_item(rows):
+    """超過行があれば「📌 今すぐ確認」に足す warning カードを返す"""
+    over_rows = [r for r in rows if r["status"] == "over"]
+    if not over_rows:
+        return None
+    detail = "・".join(f"{r['label'].split(' ', 1)[-1]} ¥{r['over']:,}" for r in over_rows) + " オーバーの見込み"
+    return {"level": "warning", "icon": "💰", "title": "予算オーバーの見込み", "detail": detail}
+
+def render_budget_check(rows):
+    """「💰 予算チェック」を横棒グラフで表示する（rowsが空なら何も出さない）"""
+    if not rows:
+        return
+    # font-sizeは rem × --font-scale（apply_display_settingsで設定）で表示設定の倍率に追従させる
+    parts = [
+        "<style>",
+        ".budget-heading{font-size:calc(1.25rem * var(--font-scale, 1));font-weight:700;margin:0.75rem 0 0.5rem;}",
+        ".budget-row{margin-bottom:0.75rem;}",
+        ".budget-label{font-size:calc(1rem * var(--font-scale, 1));font-weight:700;}",
+        ".budget-amount{font-size:calc(0.95rem * var(--font-scale, 1));}",
+        ".budget-over{font-size:calc(1rem * var(--font-scale, 1));font-weight:700;}",
+        ".budget-track{height:0.9rem;background:#e0e0e0;border:1px solid #9e9e9e;border-radius:0.45rem;overflow:hidden;margin-top:0.25rem;}",
+        ".budget-bar{height:100%;}",
+        "</style>",
+        '<div class="budget-heading">💰 予算チェック</div>',
+    ]
+    for row in rows:
+        style = BUDGET_STATUS_STYLES[row["status"]]
+        if row["budget"] > 0:
+            percent = round(row["estimate"] / row["budget"] * 100)
+        else:
+            percent = 100 if row["estimate"] > 0 else 0
+        width = min(percent, 100)
+        over_html = (
+            f'<div class="budget-over">⚠️ ¥{row["over"]:,} オーバー</div>' if row["status"] == "over" else ""
+        )
+        parts.append(
+            f'<div class="budget-row budget-{row["status"]}">'
+            f'<div class="budget-label">{html.escape(row["label"])}</div>'
+            f'<div class="budget-amount">見積 ¥{row["estimate"]:,} ／ 予算 ¥{row["budget"]:,}（{percent}%）</div>'
+            f'<div class="budget-track"><div class="budget-bar" '
+            f'style="width:{width}%;background-color:{style["color"]};"></div></div>'
+            f"{over_html}"
+            "</div>"
+        )
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+def show_plan(plan_text, budget=None):
+    """parse_key_info → render_key_info → 予算チェック → 本文表示 の順でプランを表示する"""
+    body, items, budget_estimate = parse_key_info(plan_text)
+    budget_rows = build_budget_rows(budget_estimate, budget)
+    over_item = budget_over_item(budget_rows)
+    if over_item:
+        items = [over_item] + items
     render_key_info(items)
+    render_budget_check(budget_rows)
     st.success(body)
+
+# --- サイドバーの予算設定 ---
+def allocate_budget(total_yen):
+    """総予算を既定の割合で按分し、1000円単位に丸める（丸めの端数はその他で吸収）"""
+    allocation = {}
+    for category, _, _, ratio in BUDGET_CATEGORIES:
+        allocation[category] = int(total_yen * ratio / 1000 + 0.5) * 1000
+    remainder = total_yen - sum(allocation.values())
+    allocation["other"] = max(allocation["other"] + remainder, 0)
+    return allocation
+
+def on_budget_breakdown_toggle():
+    """初めてカテゴリ別をONにしたときだけ、総予算の按分で内訳を初期化する"""
+    if st.session_state.budget_breakdown_on and not st.session_state.budget_breakdown_initialized:
+        allocation = allocate_budget(BUDGET_LEVEL_YEN[st.session_state.budget_total])
+        for category, state_key, _, _ in BUDGET_CATEGORIES:
+            st.session_state[state_key] = allocation[category]
+        st.session_state.budget_breakdown_initialized = True
+
+def get_budget_settings():
+    """サイドバーの現在値を Supabase の budget 列の形にする"""
+    breakdown_on = bool(st.session_state.budget_breakdown_on)
+    categories = None
+    if breakdown_on:
+        categories = {category: int(st.session_state[state_key] or 0) for category, state_key, _, _ in BUDGET_CATEGORIES}
+    return {
+        "total": BUDGET_LEVEL_YEN[st.session_state.budget_total],
+        "level": st.session_state.budget_total,
+        "breakdown_on": breakdown_on,
+        "categories": categories,
+    }
+
+def format_budget_context(budget):
+    """context_info に入れるカテゴリ別予算の行（OFFなら空文字）"""
+    if not budget.get("breakdown_on") or not budget.get("categories"):
+        return ""
+    lines = [f"      - {label.split(' ', 1)[-1]}: {budget['categories'][category]:,}円" for category, _, label, _ in BUDGET_CATEGORIES]
+    return "\n    - カテゴリ別予算（1人あたり・円）:\n" + "\n".join(lines)
+
+def restore_budget_to_sidebar(budget):
+    """保存された budget をサイドバーの予算ウィジェットへ戻す（ウィジェット生成前のコールバックから呼ぶ）"""
+    if not isinstance(budget, dict):
+        return
+    level = budget.get("level")
+    if level not in BUDGET_LEVEL_YEN:
+        total_yen = _parse_yen(budget.get("total"))
+        level = next((lv for lv, yen in BUDGET_LEVEL_YEN.items() if yen == total_yen), None)
+    if level:
+        st.session_state.budget_total = level
+    categories = budget.get("categories")
+    if isinstance(categories, dict):
+        for category, state_key, _, _ in BUDGET_CATEGORIES:
+            st.session_state[state_key] = _parse_yen(categories.get(category, 0)) or 0
+        st.session_state.budget_breakdown_initialized = True
+    st.session_state.budget_breakdown_on = bool(budget.get("breakdown_on")) and isinstance(categories, dict)
+
+def copy_public_plan(plan):
+    """公開プランのコピー編集（on_clickで呼ぶのでサイドバー生成前に session_state を書き換えられる）"""
+    st.session_state.final_plan = plan.get("plan_content")
+    st.session_state.last_plan_a = plan.get("plan_a")
+    st.session_state.last_plan_b = plan.get("plan_b")
+    st.session_state.plan_budget = plan.get("budget")
+    restore_budget_to_sidebar(plan.get("budget"))
+    log_event("plan_copied")
 
 # --- 4. UI設定 ---
 st.set_page_config(page_title="旅行計画立て直しAI", page_icon="🧳", layout="wide")
@@ -487,6 +718,7 @@ if "plan_id" in st.query_params and st.session_state.final_plan is None:
         st.session_state.final_plan = shared_plan["plan_content"]
         st.session_state.last_plan_a = shared_plan["plan_a"]
         st.session_state.last_plan_b = shared_plan["plan_b"]
+        st.session_state.plan_budget = shared_plan.get("budget")
     else:
         st.error("指定されたプランが見つかりませんでした。")
 
@@ -584,7 +816,18 @@ with st.sidebar:
         st.caption("※現地出発時間")
         
     st.divider()
-    budget = st.select_slider("予算", options=["節約", "標準", "贅沢"])
+    budget = st.select_slider("総予算", options=BUDGET_LEVELS, key="budget_total")
+    total_budget_yen = BUDGET_LEVEL_YEN[budget]
+    st.caption(f"目安：¥{total_budget_yen:,}（1人あたり・旅行全体）")
+    st.toggle("カテゴリ別に予算を設定する", key="budget_breakdown_on", on_change=on_budget_breakdown_toggle)
+    if st.session_state.budget_breakdown_on:
+        for _, state_key, label, _ in BUDGET_CATEGORIES:
+            st.number_input(f"{label}（円）", min_value=0, step=1000, key=state_key)
+        breakdown_diff = sum(st.session_state[state_key] for _, state_key, _, _ in BUDGET_CATEGORIES) - total_budget_yen
+        if breakdown_diff > 0:
+            st.caption(f"⚠️ 内訳の合計が総予算より¥{breakdown_diff:,}多いです")
+        elif breakdown_diff < 0:
+            st.caption(f"⚠️ 内訳の合計が総予算より¥{-breakdown_diff:,}少ないです")
     preferences = st.text_area("こだわり")
 
 # 目的地入力のガイダンスを強化
@@ -613,6 +856,10 @@ if st.button("🚀 議論を開始する") and destination:
         
         st.write(f"✅ 調査完了。現地天候：{weather_text}")
 
+    # 生成時の予算設定を保持（表示・保存・チャット再計画で引き継ぐ）
+    st.session_state.plan_budget = get_budget_settings()
+    budget_context = format_budget_context(st.session_state.plan_budget)
+
     # コンテキスト情報の構成を更新
     st.session_state.context_info = f"""
     - 旅行日: {travel_date} ({weekday_ja})
@@ -621,7 +868,7 @@ if st.button("🚀 議論を開始する") and destination:
     - 出発時刻: {departure_time.strftime('%H:%M')}
     - 往路(行きの便): {f_out_no} (現地に {f_out_time} 到着予定)
     - 復路(帰りの便): {f_return_no} (現地を {f_return_time} 出発予定)
-    - 予算感: {budget}
+    - 予算感: {budget}（総予算の目安：1人あたり・旅行全体で約{total_budget_yen:,}円）{budget_context}
     - ユーザーのこだわり: {preferences}
     - 現地コンディション: {weather_text}
     - 服装アドバイス: {clothing_tip}
@@ -648,14 +895,15 @@ if st.button("🚀 議論を開始する") and destination:
 if st.session_state.final_plan:
     st.divider()
     st.subheader("⚖️ 最終判断（プラン）")
-    show_plan(st.session_state.final_plan)
+    show_plan(st.session_state.final_plan, st.session_state.plan_budget)
 
     if st.button("🔗 共有用URLを発行"):
         try:
             st.session_state.share_url = save_plan_and_get_url(
                 st.session_state.final_plan,
                 st.session_state.last_plan_a,
-                st.session_state.last_plan_b
+                st.session_state.last_plan_b,
+                st.session_state.plan_budget
             )
             log_event("share_url_created")
         except Exception as e:
@@ -675,7 +923,8 @@ if st.session_state.final_plan:
                     st.session_state.last_plan_a,
                     st.session_state.last_plan_b,
                     st.session_state.user_id,
-                    is_public
+                    is_public,
+                    st.session_state.plan_budget
                 )
                 log_event("plan_saved")
                 if is_public:
@@ -751,7 +1000,7 @@ if public_plans:
     for p in public_plans:
         label = f"📍 {p.get('destination') or '目的地不明'}｜🗓️ {p.get('travel_date') or '日付不明'}｜投稿日時: {p.get('created_at')}"
         with st.expander(label):
-            show_plan(p.get("plan_content"))
+            show_plan(p.get("plan_content"), p.get("budget"))
             col_a, col_b = st.columns(2)
             with col_a:
                 st.chat_message("assistant", avatar="🌸").markdown("**Agent A (ワクワク担当)**")
@@ -760,12 +1009,8 @@ if public_plans:
                 st.chat_message("assistant", avatar="⚡").markdown("**Agent B (現実担当)**")
                 st.write(p.get("plan_b"))
 
-            if st.button("📋 このプランをコピーして編集する", key=f"copy_{p['id']}"):
-                st.session_state.final_plan = p.get("plan_content")
-                st.session_state.last_plan_a = p.get("plan_a")
-                st.session_state.last_plan_b = p.get("plan_b")
-                log_event("plan_copied")
-                st.rerun()
+            # サイドバーの予算ウィジェットを書き換えるため、on_click（次の実行の前）で処理する
+            st.button("📋 このプランをコピーして編集する", key=f"copy_{p['id']}", on_click=copy_public_plan, args=(p,))
 else:
     st.caption("まだ公開されているプランはありません。")
 
@@ -781,7 +1026,7 @@ else:
             badge = "🌍公開" if saved.get("is_public") else "🔒非公開"
             label = f"{badge}｜📍 {saved.get('destination') or '目的地不明'}｜🗓️ {saved.get('travel_date') or '日付不明'}｜保存日時: {saved.get('created_at')}"
             with st.expander(label):
-                show_plan(saved.get("plan_content"))
+                show_plan(saved.get("plan_content"), saved.get("budget"))
                 col_a, col_b = st.columns(2)
                 with col_a:
                     st.chat_message("assistant", avatar="🌸").markdown("**Agent A (ワクワク担当)**")
