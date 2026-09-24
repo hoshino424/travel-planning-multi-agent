@@ -44,6 +44,13 @@ if "session_logged" not in st.session_state:
 for k in ["current_lat", "current_lng", "current_location_name", "last_realtime_lat", "last_realtime_lng"]:
     if k not in st.session_state:
         st.session_state[k] = None
+# 表示設定（ウィジェットにはvalueを渡さず、ここで初期値を入れる）
+if "font_scale" not in st.session_state:
+    st.session_state.font_scale = 100
+if "button_scale" not in st.session_state:
+    st.session_state.button_scale = 100
+if "outdoor_mode" not in st.session_state:
+    st.session_state.outdoor_mode = False
 
 # --- 認証セッションの復元（Streamlitは再実行のたびにsupabaseクライアントを作り直すため） ---
 if st.session_state.sb_access_token and st.session_state.sb_refresh_token:
@@ -244,9 +251,123 @@ def ask_agent(role_prompt, context, user_input):
     )
     return response.choices[0].message.content
 
+# --- 表示サイズ調整 ---
+OUTDOOR_FONT_SCALE = 140
+OUTDOOR_BUTTON_SCALE = 160
+
+def apply_display_settings():
+    """session_stateの表示設定からCSSを生成して注入する"""
+    outdoor = st.session_state.get("outdoor_mode", False)
+    if outdoor:
+        font = OUTDOOR_FONT_SCALE / 100
+        btn = OUTDOOR_BUTTON_SCALE / 100
+    else:
+        font = st.session_state.get("font_scale", 100) / 100
+        btn = st.session_state.get("button_scale", 100) / 100
+
+    # 対象はメイン画面とサイドバー（Streamlitのヘッダー/ツールバーには効かせない）
+    areas = ['[data-testid="stMain"]', '[data-testid="stSidebar"]']
+
+    def sel(*parts):
+        return ",\n".join(f"{a} {p}" for a in areas for p in parts)
+
+    buttons = sel(
+        '[data-testid="stButton"] button',
+        '[data-testid="stDownloadButton"] button',
+        '[data-testid="stFormSubmitButton"] button',
+        '[data-testid="stLinkButton"] a',
+        '[data-testid="stPopover"] button',
+    )
+    button_labels = sel(
+        '[data-testid="stButton"] button [data-testid="stMarkdownContainer"] p',
+        '[data-testid="stDownloadButton"] button [data-testid="stMarkdownContainer"] p',
+        '[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"] p',
+        '[data-testid="stLinkButton"] a [data-testid="stMarkdownContainer"] p',
+        '[data-testid="stPopover"] button [data-testid="stMarkdownContainer"] p',
+    )
+
+    css = f"""
+<style>
+{sel('[data-testid="stMarkdownContainer"]',
+     '[data-testid="stMarkdownContainer"] p',
+     '[data-testid="stMarkdownContainer"] li',
+     '[data-testid="stWidgetLabel"] p')} {{
+    font-size: calc(1rem * {font}) !important;
+}}
+{sel('[data-testid="stCaptionContainer"]', '[data-testid="stCaptionContainer"] p')} {{
+    font-size: calc(0.875rem * {font}) !important;
+}}
+{sel('h1')} {{ font-size: calc(2.75rem * {font}) !important; }}
+{sel('h2')} {{ font-size: calc(2.25rem * {font}) !important; }}
+{sel('h3')} {{ font-size: calc(1.75rem * {font}) !important; }}
+{sel('h4')} {{ font-size: calc(1.5rem * {font}) !important; }}
+{sel('input', 'textarea', '[data-testid="stSelectbox"] div')},
+[data-testid="stChatInputTextArea"] {{
+    font-size: calc(1rem * {font}) !important;
+}}
+{buttons} {{
+    min-height: max(48px, calc(2.5rem * {btn})) !important;
+    padding: calc(0.25rem * {btn}) calc(0.75rem * {btn}) !important;
+    font-size: calc(1rem * {btn}) !important;
+}}
+{button_labels} {{
+    font-size: calc(1rem * {btn}) !important;
+}}
+</style>
+"""
+
+    if outdoor:
+        css += f"""
+<style>
+[data-testid="stApp"],
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div {{
+    background-color: #ffffff !important;
+}}
+[data-testid="stSidebar"] {{
+    border-right: 2px solid #000000 !important;
+}}
+{sel('[data-testid="stMarkdownContainer"]', '[data-testid="stMarkdownContainer"] *',
+     '[data-testid="stCaptionContainer"]', '[data-testid="stCaptionContainer"] *',
+     '[data-testid="stWidgetLabel"] *', 'h1', 'h2', 'h3', 'h4',
+     'input', 'textarea')} {{
+    color: #000000 !important;
+}}
+{sel('a', '[data-testid="stMarkdownContainer"] a')} {{
+    color: #0000cc !important;
+    font-weight: 700 !important;
+    text-decoration: underline !important;
+}}
+{sel('input', 'textarea')},
+[data-testid="stChatInputTextArea"] {{
+    background-color: #ffffff !important;
+    color: #000000 !important;
+}}
+{buttons} {{
+    border: 2px solid #000000 !important;
+}}
+</style>
+"""
+    st.markdown(css, unsafe_allow_html=True)
+
+def render_display_settings():
+    """タイトル直下に表示設定UIを置く（popoverが無い古いStreamlitではexpanderで代用）"""
+    container = st.popover("⚙️ 表示設定") if hasattr(st, "popover") else st.expander("⚙️ 表示設定")
+    with container:
+        outdoor = st.session_state.outdoor_mode
+        st.slider("文字サイズ（%）", min_value=100, max_value=160, step=10, key="font_scale", disabled=outdoor)
+        st.slider("ボタンサイズ（%）", min_value=100, max_value=200, step=10, key="button_scale", disabled=outdoor)
+        st.toggle("☀️ 屋外モード", key="outdoor_mode")
+        if outdoor:
+            st.caption(f"屋外モード中：文字{OUTDOOR_FONT_SCALE}%・ボタン{OUTDOOR_BUTTON_SCALE}%・高コントラストで表示しています")
+
 # --- 4. UI設定 ---
 st.set_page_config(page_title="旅行計画立て直しAI", page_icon="🧳", layout="wide")
+apply_display_settings()
 st.title("✈️ 旅行計画立て直しAI")
+render_display_settings()
 st.caption("旅行先での営業時間や天候の変化にも、その場でスムーズに立て直せます")
 
 with st.expander("📖 使い方", expanded=False):
