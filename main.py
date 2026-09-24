@@ -3,6 +3,8 @@ import os
 import datetime
 import requests
 import json
+import re
+import html
 import urllib.parse
 import uuid
 import pandas as pd
@@ -240,7 +242,18 @@ def get_place_details_text(place_name):
 ROLES = {
     "A": "あなたは【旅の理想・ワクワク担当】です。日本語で、1〜3時間のゆとりあるブロック形式のプランを提案してください。画像やリンクも活用して。",
     "B": "あなたは【現実の制約・ブレーキ担当】です。必ず日本語で回答してください。移動距離や天候リスク、営業時間を厳密にチェックし、無理がないか批判的に検討してください。",
-    "C": "あなたは【まとめ担当】です。日本語で最終案を出してください。冒頭に『☀️当日のコンディション』、最後に提供されたリンクを全て含む『🔗旅の参考リンク集』を必ず掲載してください。"
+    "C": (
+        "あなたは【まとめ担当】です。日本語で最終案を出してください。冒頭に『☀️当日のコンディション』、最後に提供されたリンクを全て含む『🔗旅の参考リンク集』を必ず掲載してください。"
+        "プラン本文中の時刻（例：**14:30**）と金額（例：**1,500円**）は必ず **太字** にしてください。\n"
+        "さらに、『🔗旅の参考リンク集』の後、回答の一番最後に、旅行中に急いで見ても分かる重要情報を次の形式で必ず出力してください。"
+        "ブロックはコードブロックで囲まず、JSONは1行で出力し、ブロックの後には何も書かないでください。\n"
+        "<<<KEY_INFO>>>\n"
+        '{"items":[{"level":"danger|warning|info","icon":"絵文字1つ","title":"20字以内","detail":"40字以内"}]}\n'
+        "<<<END_KEY_INFO>>>\n"
+        "level の基準：danger＝時間の締切（フライト、終電、閉館・最終入場、予約時刻）、"
+        "warning＝注意（雨、定休日、混雑、長距離移動）、info＝次の行動。"
+        "items は重要度の高い順に最大5件としてください。"
+    )
 }
 
 def ask_agent(role_prompt, context, user_input):
@@ -288,6 +301,7 @@ def apply_display_settings():
 
     css = f"""
 <style>
+:root {{ --font-scale: {font}; }}
 {sel('[data-testid="stMarkdownContainer"]',
      '[data-testid="stMarkdownContainer"] p',
      '[data-testid="stMarkdownContainer"] li',
@@ -362,6 +376,89 @@ def render_display_settings():
         st.toggle("☀️ 屋外モード", key="outdoor_mode")
         if outdoor:
             st.caption(f"屋外モード中：文字{OUTDOOR_FONT_SCALE}%・ボタン{OUTDOOR_BUTTON_SCALE}%・高コントラストで表示しています")
+
+# --- 重要情報カード ---
+# ```json で囲まれて返ってきた場合もフェンスごと取り除く
+KEY_INFO_PATTERN = re.compile(
+    r"(?:```[a-zA-Z]*\s*)?<<<KEY_INFO>>>(.*?)<<<END_KEY_INFO>>>(?:\s*```)?", re.DOTALL
+)
+# 終了マーカーがない（出力が途中で切れた）場合は開始マーカー以降を捨てる
+KEY_INFO_UNCLOSED_PATTERN = re.compile(r"(?:```[a-zA-Z]*\s*)?<<<KEY_INFO>>>.*\Z", re.DOTALL)
+KEY_INFO_LEVELS = {
+    "danger": {"label": "⛔ 締切", "color": "#c62828", "bg": "#fdecea"},
+    "warning": {"label": "⚠️ 注意", "color": "#f9a825", "bg": "#fff8e1"},
+    "info": {"label": "➡️ 次の行動", "color": "#1565c0", "bg": "#e3f2fd"},
+}
+
+def parse_key_info(text):
+    """プラン全文から重要情報ブロックを取り出し、(ブロックを除いた本文, items) を返す"""
+    if not text:
+        return text or "", []
+    items = []
+    match = KEY_INFO_PATTERN.search(text)
+    if match:
+        raw = match.group(1).strip()
+        raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw)
+        try:
+            data = json.loads(raw)
+            raw_items = data.get("items", []) if isinstance(data, dict) else []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                detail = str(item.get("detail") or "").strip()
+                if not title and not detail:
+                    continue
+                level = str(item.get("level") or "").strip().lower()
+                items.append({
+                    "level": level if level in KEY_INFO_LEVELS else "info",
+                    "icon": str(item.get("icon") or "").strip(),
+                    "title": title,
+                    "detail": detail,
+                })
+                if len(items) >= 5:
+                    break
+        except (ValueError, TypeError, AttributeError):
+            items = []
+    body = KEY_INFO_PATTERN.sub("", text)
+    body = KEY_INFO_UNCLOSED_PATTERN.sub("", body)
+    return body.rstrip(), items
+
+def render_key_info(items):
+    """重要情報を danger→warning→info の順にカード表示する（itemsが空なら何も出さない）"""
+    if not items:
+        return
+    order = list(KEY_INFO_LEVELS)
+    sorted_items = sorted(items, key=lambda i: order.index(i["level"]))
+    # font-sizeは rem × --font-scale（apply_display_settingsで設定）で表示設定の倍率に追従させる
+    parts = [
+        "<style>",
+        ".key-info-heading{font-size:calc(1.25rem * var(--font-scale, 1));font-weight:700;margin:0.5rem 0;}",
+        ".key-info-card{border-left:0.5rem solid;border-radius:0.25rem;padding:0.6rem 0.8rem;margin-bottom:0.5rem;color:#1a1a1a;}",
+        ".key-info-level{font-size:calc(0.8rem * var(--font-scale, 1));font-weight:700;}",
+        ".key-info-title{font-size:calc(1.1rem * var(--font-scale, 1));font-weight:700;}",
+        ".key-info-detail{font-size:calc(1rem * var(--font-scale, 1));}",
+        "</style>",
+        '<div class="key-info-heading">📌 今すぐ確認</div>',
+    ]
+    for item in sorted_items:
+        level = KEY_INFO_LEVELS[item["level"]]
+        icon = html.escape(item["icon"])
+        parts.append(
+            f'<div class="key-info-card key-info-{item["level"]}" '
+            f'style="border-left-color:{level["color"]};background-color:{level["bg"]};">'
+            f'<div class="key-info-level">{level["label"]}</div>'
+            f'<div class="key-info-title">{icon} {html.escape(item["title"])}</div>'
+            f'<div class="key-info-detail">{html.escape(item["detail"])}</div>'
+            "</div>"
+        )
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+def show_plan(plan_text):
+    """parse_key_info → render_key_info → 本文表示 の順でプランを表示する"""
+    body, items = parse_key_info(plan_text)
+    render_key_info(items)
+    st.success(body)
 
 # --- 4. UI設定 ---
 st.set_page_config(page_title="旅行計画立て直しAI", page_icon="🧳", layout="wide")
@@ -551,7 +648,7 @@ if st.button("🚀 議論を開始する") and destination:
 if st.session_state.final_plan:
     st.divider()
     st.subheader("⚖️ 最終判断（プラン）")
-    st.success(st.session_state.final_plan)
+    show_plan(st.session_state.final_plan)
 
     if st.button("🔗 共有用URLを発行"):
         try:
@@ -654,7 +751,7 @@ if public_plans:
     for p in public_plans:
         label = f"📍 {p.get('destination') or '目的地不明'}｜🗓️ {p.get('travel_date') or '日付不明'}｜投稿日時: {p.get('created_at')}"
         with st.expander(label):
-            st.success(p.get("plan_content"))
+            show_plan(p.get("plan_content"))
             col_a, col_b = st.columns(2)
             with col_a:
                 st.chat_message("assistant", avatar="🌸").markdown("**Agent A (ワクワク担当)**")
@@ -684,7 +781,7 @@ else:
             badge = "🌍公開" if saved.get("is_public") else "🔒非公開"
             label = f"{badge}｜📍 {saved.get('destination') or '目的地不明'}｜🗓️ {saved.get('travel_date') or '日付不明'}｜保存日時: {saved.get('created_at')}"
             with st.expander(label):
-                st.success(saved.get("plan_content"))
+                show_plan(saved.get("plan_content"))
                 col_a, col_b = st.columns(2)
                 with col_a:
                     st.chat_message("assistant", avatar="🌸").markdown("**Agent A (ワクワク担当)**")
